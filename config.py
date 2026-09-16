@@ -1,6 +1,12 @@
 """
 config.py - Configuration globale de l'outil de retranscription JDR.
 Toutes les constantes ajustables sont centralisées ici.
+
+Flux de travail Lore :
+  lore_inputs/   → Sources archivées (.pdf, .md) analysées par build-context
+  lore_ajouts/   → Transit pour enrichissement incrémental (update-context)
+                   Les fichiers sont déplacés vers lore_inputs/ après traitement
+  contexts/      → Fichiers JSON thématiques générés
 """
 
 import os
@@ -20,8 +26,18 @@ OLLAMA_MODEL: str = os.getenv("JDR_OLLAMA_MODEL", "mistral:7b-instruct")
 OLLAMA_TIMEOUT: int = 300
 
 # ---------------------------------------------------------------------------
-# WhisperX
+# WhisperX & Calcul
 # ---------------------------------------------------------------------------
+
+# Détection dynamique de la présence d'un GPU NVIDIA (CUDA)
+def _detect_cuda() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+_HAS_CUDA: bool = _detect_cuda()
 
 # Modèle Whisper à utiliser : tiny, base, small, medium, large-v1, large-v2, large-v3
 WHISPER_MODEL: str = os.getenv("JDR_WHISPER_MODEL", "large-v2")
@@ -29,14 +45,19 @@ WHISPER_MODEL: str = os.getenv("JDR_WHISPER_MODEL", "large-v2")
 # Langue de la session (laisser None pour détection automatique)
 WHISPER_LANGUAGE: str | None = os.getenv("JDR_LANGUAGE", "fr")
 
-# Device de calcul : "cuda" ou "cpu"
-WHISPER_DEVICE: str = os.getenv("JDR_DEVICE", "cuda")
+# Device de calcul : "cuda" (si GPU NVIDIA disponible) ou "cpu"
+WHISPER_DEVICE: str = os.getenv("JDR_DEVICE", "cuda" if _HAS_CUDA else "cpu")
 
 # Type de calcul : "float16" (GPU), "int8" (CPU/GPU économe), "float32"
-WHISPER_COMPUTE_TYPE: str = os.getenv("JDR_COMPUTE_TYPE", "float16")
+WHISPER_COMPUTE_TYPE: str = os.getenv(
+    "JDR_COMPUTE_TYPE", "float16" if _HAS_CUDA else "int8"
+)
 
-# Taille des batchs pour WhisperX (réduire si manque de VRAM)
-WHISPER_BATCH_SIZE: int = int(os.getenv("JDR_BATCH_SIZE", "16"))
+# Taille des batchs pour WhisperX (réduire si CPU ou manque de VRAM)
+WHISPER_BATCH_SIZE: int = int(os.getenv("JDR_BATCH_SIZE", "16" if _HAS_CUDA else "4"))
+
+# Fichier de mapping des joueurs par défaut s'il existe à la racine
+PLAYERS_MAPPING_FILE: str = os.getenv("JDR_PLAYERS_MAPPING", "players.json")
 
 # ---------------------------------------------------------------------------
 # Pyannote (Diarisation)
@@ -64,8 +85,12 @@ CHUNK_OVERLAP_WORDS: int = 100
 # Dossier contenant les fichiers audio des sessions (entrée)
 AUDIO_DIR: str = os.getenv("JDR_AUDIO_DIR", "enregistrements")
 
-# Dossier contenant les sources de lore (.pdf et .md) pour build-context (entrée)
+# Dossier contenant les sources de lore (.pdf et .md) pour build-context (archive complète)
 LORE_INPUTS_DIR: str = os.getenv("JDR_LORE_INPUTS_DIR", "lore_inputs")
+
+# Dossier de transit pour l'enrichissement incrémental du lore (update-context)
+# Les fichiers sont automatiquement déplacés vers LORE_INPUTS_DIR après traitement
+LORE_ADDITIONS_DIR: str = os.getenv("JDR_LORE_ADDITIONS_DIR", "lore_ajouts")
 
 # Dossier de sauvegarde des contextes lore thématiques (JSON éditables, sortie)
 CONTEXTS_DIR: str = os.getenv("JDR_CONTEXTS_DIR", "contexts")
@@ -79,7 +104,7 @@ OUTPUT_DIR: str = os.getenv("JDR_OUTPUT_DIR", "output")
 
 def _ensure_dirs() -> None:
     """Crée les dossiers de travail s'ils n'existent pas encore."""
-    for _dir in (AUDIO_DIR, LORE_INPUTS_DIR, CONTEXTS_DIR, OUTPUT_DIR):
+    for _dir in (AUDIO_DIR, LORE_INPUTS_DIR, LORE_ADDITIONS_DIR, CONTEXTS_DIR, OUTPUT_DIR):
         Path(_dir).mkdir(parents=True, exist_ok=True)
 
 _ensure_dirs()

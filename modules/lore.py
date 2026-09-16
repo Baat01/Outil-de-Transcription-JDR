@@ -12,14 +12,18 @@ Nouvelles fonctionnalités :
 
 import json
 import logging
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import fitz  # PyMuPDF
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz  # PyMuPDF fallback
 
 from modules.ollama_client import query_llm
-from config import OLLAMA_MODEL, CONTEXTS_DIR
+from config import OLLAMA_MODEL, CONTEXTS_DIR, LORE_INPUTS_DIR, LORE_ADDITIONS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -485,3 +489,142 @@ def load_context_for_transcription(
         "initial_prompt": initial_prompt,
         "context": context,
     }
+
+
+# ---------------------------------------------------------------------------
+# Enrichissement incrémental du contexte
+# ---------------------------------------------------------------------------
+
+def update_existing_context(
+    theme: str,
+    additions_dir: str | Path = LORE_ADDITIONS_DIR,
+    archive_dir: str | Path = LORE_INPUTS_DIR,
+    contexts_dir: str | Path = CONTEXTS_DIR,
+    model: str = OLLAMA_MODEL,
+) -> dict:
+    """
+    Enrichit un contexte existant avec de nouveaux fichiers issus de LORE_ADDITIONS_DIR,
+    sans retraiter l'intégralité des sources archivées.
+
+    Flux de travail :
+      1. Vérifie que le contexte JSON existe (sinon, redirige vers build-context).
+      2. Extrait les textes des fichiers dans `additions_dir` uniquement.
+      3. Envoie ces nouveaux textes + contexte actuel au LLM pour enrichissement.
+      4. Sauvegarde le contexte fusionné.
+      5. Déplace les fichiers traités de `additions_dir` vers `archive_dir`
+         (qui sert d'archive complète : lore_inputs/).
+
+    Args:
+        theme:         Nom de l'univers / thème (ex: "Naruto").
+        additions_dir: Dossier de transit contenant les nouveaux fichiers (.pdf/.md).
+        archive_dir:   Dossier d'archive vers lequel déplacer les fichiers après traitement.
+        contexts_dir:  Dossier des contextes JSON.
+        model:         Modèle Ollama.
+
+    Returns:
+        Le contexte dict mis à jour avec "keywords" pour WhisperX.
+
+    Raises:
+        FileNotFoundError: Si le contexte de base n'existe pas encore.
+        RuntimeError:      Si le dossier d'ajouts est vide ou illisible.
+    """
+    additions_dir = Path(additions_dir)
+    archive_dir = Path(archive_dir)
+    contexts_dir = Path(contexts_dir)
+
+    # --- 1. Vérification préalable : le contexte de base doit exister ---
+    context_path = get_context_path(theme, contexts_dir)
+    if not context_path.exists():
+        raise FileNotFoundError(
+            f"Aucun contexte de base trouvé pour le thème '{theme}'.\n"
+            f"Fichier attendu : {context_path}\n"
+            f"Créez-le d'abord avec : python main.py build-context --theme \"{theme}\""
+        )
+
+    logger.info(
+        "Enrichissement incrémental du contexte '%s' depuis '%s'…",
+        theme, additions_dir,
+    )
+    existing_context = load_context(theme, contexts_dir)
+
+    # --- 2. Extraction des textes uniquement depuis lore_ajouts/ ---
+    source_files = extract_texts_from_directory(additions_dir)
+    # On collecte les chemins réels pour les déplacer ensuite
+    real_paths: list[Path] = sorted(
+        [
+            p for p in additions_dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in (".pdf", ".md")
+        ]
+    )
+
+    logger.info(
+        "Traitement de %d nouveau(x) fichier(s) pour '%s'…",
+        len(source_files), theme,
+    )
+
+    # --- 3. Extraction structurée de chaque nouveau fichier ---
+    aggregated: dict = {k: [] for k in CONTEXT_SCHEMA_KEYS}
+    for file_name, text in source_files:
+        logger.info("  -> Extraction depuis : %s", file_name)
+        extracted = _extract_structured_from_text(text, theme=theme, model=model)
+        for key in CONTEXT_SCHEMA_KEYS:
+            aggregated[key].extend(extracted.get(key, []))
+
+    # --- 4. Fusion enrichissement + contexte existant via LLM ---
+    logger.info("Fusion des nouvelles données avec le contexte existant via LLM…")
+    merged_data = _merge_contexts_with_llm(
+        existing_context, aggregated, theme=theme, model=model
+    )
+
+    final_context = existing_context.copy()
+    final_context.update(merged_data)
+
+    # --- 5. Sauvegarde ---
+    saved_path = save_context(final_context, theme, contexts_dir)
+    total_kw = len(final_context.get("keywords", []))
+    logger.info(
+        "Contexte '%s' enrichi : %d mots-clés → %s",
+        theme, total_kw, saved_path.name,
+    )
+
+    # --- 6. Déplacement des fichiers traités : lore_ajouts/ → lore_inputs/ ---
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    moved: int = 0
+    errors: int = 0
+    for src_path in real_paths:
+        # Reconstruction du chemin relatif pour préserver les éventuels sous-dossiers
+        try:
+            rel = src_path.relative_to(additions_dir)
+        except ValueError:
+            rel = Path(src_path.name)
+
+        dest_path = archive_dir / rel
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Éviter d'écraser un fichier identique déjà archivé
+        if dest_path.exists():
+            stem = dest_path.stem
+            suffix = dest_path.suffix
+            dest_path = dest_path.parent / f"{stem}_ajout_{datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
+
+        try:
+            shutil.move(str(src_path), str(dest_path))
+            logger.info("  Déplacé : %s → %s", src_path.name, dest_path)
+            moved += 1
+        except OSError as exc:
+            logger.warning("  Impossible de déplacer '%s' : %s", src_path.name, exc)
+            errors += 1
+
+    if moved:
+        logger.info(
+            "%d fichier(s) archivé(s) dans '%s'. %d erreur(s).",
+            moved, archive_dir, errors,
+        )
+    if errors:
+        logger.warning(
+            "%d fichier(s) n'ont pas pu être déplacés. "
+            "Vérifiez les permissions et déplacez-les manuellement vers '%s'.",
+            errors, archive_dir,
+        )
+
+    return final_context

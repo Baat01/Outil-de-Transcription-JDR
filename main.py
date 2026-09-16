@@ -1,18 +1,21 @@
 """
-main.py — v5 : Interface CLI avec sous-commandes (subcommands).
+main.py — v6 : Interface CLI avec sous-commandes (subcommands).
 
 Architecture des dossiers :
   enregistrements/   Fichiers audio des sessions (entrée)
-  lore_inputs/       Fichiers PDF et Markdown de lore (entrée, récursif)
+  lore_inputs/       Archive complète des sources PDF/Markdown analysées
+  lore_ajouts/       Transit pour enrichissement incrémental (update-context)
   contexts/          Contextes lore thématiques JSON (sortie build-context)
   output/            Transcriptions et résumés générés (sortie transcribe)
 
 Sous-commandes disponibles :
   build-context   Construit ou met à jour le contexte lore d'un thème
+  update-context  Enrichit un contexte existant avec de nouveaux fichiers (lore_ajouts/)
   transcribe      Lance le pipeline complet de retranscription
 
 Exemples :
   python main.py build-context --theme "Naruto"
+  python main.py update-context --theme "Naruto"
   python main.py transcribe --context "Naruto"
   python main.py transcribe --context "Naruto" --mapping players.json
 """
@@ -46,7 +49,7 @@ def setup_logging(verbose: bool = False) -> None:
 
 import config
 from modules.ollama_client import check_ollama_server, check_model_available
-from modules.lore import build_context, load_context_for_transcription
+from modules.lore import build_context, update_existing_context, load_context_for_transcription
 from modules.audio import (
     transcribe_audio,
     load_player_mapping,
@@ -103,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Traitement 100%% local (WhisperX + Ollama).\n\n"
             "Sous-commandes disponibles :\n"
             "  build-context   Construit ou met à jour le contexte lore d'un thème\n"
+            "  update-context  Enrichit un contexte existant avec de nouveaux fichiers\n"
             "  transcribe      Lance le pipeline complet de retranscription"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -175,6 +179,52 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # ------------------------------------------------------------------
+    # Sous-commande : update-context
+    # ------------------------------------------------------------------
+    uc = subparsers.add_parser(
+        "update-context",
+        help="Enrichit un contexte existant avec de nouveaux fichiers depuis lore_ajouts/.",
+        description=(
+            f"Lit uniquement les nouveaux fichiers du dossier '{config.LORE_ADDITIONS_DIR}/',\n"
+            "les analyse via LLM et fusionne intelligemment avec le contexte existant.\n"
+            f"Les fichiers traités sont ensuite archivés dans '{config.LORE_INPUTS_DIR}/'.\n\n"
+            "⚠\ufe0f  Le contexte de base doit exister (créez-le d'abord avec build-context)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Exemples :\n"
+            "  python main.py update-context --theme \"Naruto\"\n"
+            "  python main.py update-context --theme \"Fantaisie\" --model llama3.1:8b\n"
+            f"\nDossier de transit (nouveaux fichiers) : ./{config.LORE_ADDITIONS_DIR}/\n"
+            f"Archive après traitement             : ./{config.LORE_INPUTS_DIR}/\n"
+        ),
+    )
+    uc.add_argument(
+        "--theme", "-t",
+        required=True,
+        metavar="THEME",
+        help="Nom de l'univers / thème à enrichir (ex: \"Naruto\")",
+    )
+    uc.add_argument(
+        "--model", "-m",
+        default=config.OLLAMA_MODEL,
+        metavar="MODEL",
+        help=f"Modèle Ollama (défaut : {config.OLLAMA_MODEL})",
+    )
+    uc.add_argument(
+        "--additions-dir",
+        default=config.LORE_ADDITIONS_DIR,
+        metavar="DIR",
+        help=f"Dossier de transit (défaut : {config.LORE_ADDITIONS_DIR})",
+    )
+    uc.add_argument(
+        "--contexts-dir",
+        default=config.CONTEXTS_DIR,
+        metavar="DIR",
+        help=f"Dossier des contextes (défaut : {config.CONTEXTS_DIR})",
+    )
+
+    # ------------------------------------------------------------------
     # Sous-commande : transcribe
     # ------------------------------------------------------------------
     tr = subparsers.add_parser(
@@ -220,7 +270,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--mapping",
         default=None,
         metavar="JSON_FILE",
-        help="Fichier JSON de mapping joueurs (ex: players.json)",
+        help=(
+            f"Fichier JSON de mapping joueurs (ex: players.json). "
+            f"Détecte automatiquement '{config.PLAYERS_MAPPING_FILE}' à la racine s'il existe."
+        ),
     )
     tr.add_argument(
         "--model", "-m",
@@ -351,6 +404,93 @@ def run_build_context(args: argparse.Namespace) -> int:
     return 0
 
 
+
+# ---------------------------------------------------------------------------
+# Sous-commande : update-context
+# ---------------------------------------------------------------------------
+
+TOTAL_STEPS_UPDATE = 3
+
+
+def run_update_context(args: argparse.Namespace) -> int:
+    """
+    Orchestre l'enrichissement incrémental d'un contexte lore existant.
+
+    Lit uniquement les fichiers de lore_ajouts/, les analyse, fusionne avec
+    le contexte existant, puis déplace les fichiers traités vers lore_inputs/.
+
+    Returns:
+        0 si succès, 1 si erreur critique.
+    """
+    start = time.time()
+    theme = args.theme
+    additions_dir = Path(args.additions_dir).resolve()
+    archive_dir = Path(config.LORE_INPUTS_DIR).resolve()
+    contexts_dir = Path(args.contexts_dir).resolve()
+    model = args.model
+
+    _banner(f"UPDATE-CONTEXT : enrichissement du thème « {theme} »")
+    print(f"  Nouveaux fichiers : {additions_dir}")
+    print(f"  Archive (après)   : {archive_dir}")
+    print(f"  Contextes         : {contexts_dir}")
+    print(f"  Modèle LLM        : {model}")
+    print(f"{'═' * 65}")
+
+    # Étape 1 — Vérifications
+    _step(1, TOTAL_STEPS_UPDATE, "Vérifications préalables")
+    if not additions_dir.is_dir():
+        logger.error("Dossier d'ajouts introuvable : %s", additions_dir)
+        return 1
+    try:
+        check_ollama_server()
+        check_model_available(model)
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        return 1
+    _ok("Serveur Ollama actif et modèle disponible.")
+
+    # Étape 2 — Enrichissement incrémental
+    _step(2, TOTAL_STEPS_UPDATE, f"Enrichissement du contexte « {theme} »")
+    try:
+        context = update_existing_context(
+            theme=theme,
+            additions_dir=additions_dir,
+            archive_dir=archive_dir,
+            contexts_dir=contexts_dir,
+            model=model,
+        )
+    except FileNotFoundError as exc:
+        logger.error("%s", exc)
+        return 1
+    except RuntimeError as exc:
+        logger.error("Erreur lors de l'enrichissement : %s", exc)
+        return 1
+
+    # Étape 3 — Résumé
+    _step(3, TOTAL_STEPS_UPDATE, "Résumé")
+    from modules.lore import get_context_path
+    ctx_path = get_context_path(theme, contexts_dir)
+    kw_count = len(context.get("keywords", []))
+
+    elapsed = time.time() - start
+    m, s = divmod(int(elapsed), 60)
+
+    print(f"\n{'═' * 65}")
+    print(f"  🏆  CONTEXTE « {theme} » ENRICHI AVEC SUCCÈS")
+    print(f"{'═' * 65}")
+    print(f"  Mots-clés      : {kw_count}")
+    print(f"  Personnages    : {len(context.get('characters', []))}")
+    print(f"  Lieux          : {len(context.get('locations', []))}")
+    print(f"  Objets         : {len(context.get('items', []))}")
+    print(f"  Factions       : {len(context.get('factions', []))}")
+    print(f"  Termes         : {len(context.get('terms', []))}")
+    print(f"  Fichier        : {ctx_path}")
+    print(f"  Durée          : {m}min {s}s")
+    print(f"  📦  Fichiers archivés dans : {archive_dir}")
+    print(f"{'═' * 65}\n")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Sous-commande : transcribe
 # ---------------------------------------------------------------------------
@@ -380,10 +520,16 @@ def run_transcribe(args: argparse.Namespace) -> int:
     is_dir_input = audio_input.is_dir()
     audio_mode = "dossier multi-fichiers" if is_dir_input else "fichier unique"
 
+    # Résolution du fichier de mapping joueurs (CLI prioritaire, sinon players.json à la racine)
+    effective_mapping = args.mapping
+    if not effective_mapping and Path(config.PLAYERS_MAPPING_FILE).is_file():
+        effective_mapping = config.PLAYERS_MAPPING_FILE
+        logger.info("Fichier '%s' détecté automatiquement à la racine.", effective_mapping)
+
     _banner(f"TRANSCRIBE : {audio_input.name} (contexte : {theme})")
     print(f"  Audio          : {audio_input}  [{audio_mode}]")
     print(f"  Contexte       : {theme}")
-    print(f"  Mapping        : {args.mapping or 'Aucun'}")
+    print(f"  Mapping        : {effective_mapping or 'Aucun'}")
     print(f"  Modèle LLM     : {model}")
     print(f"  Whisper        : {args.whisper_model} ({args.device})")
     print(f"  Diarisation    : {'NON' if args.no_diarization else 'OUI (Pyannote)'}")
@@ -436,10 +582,10 @@ def run_transcribe(args: argparse.Namespace) -> int:
     # ------------------------------------------------------------------
     _step(3, TOTAL_STEPS_TRANS, "Chargement du mapping joueurs")
     player_mapping: dict | None = None
-    if args.mapping:
+    if effective_mapping:
         try:
-            player_mapping = load_player_mapping(args.mapping)
-            _ok(f"{len(player_mapping)} joueur(s) mappé(s).")
+            player_mapping = load_player_mapping(effective_mapping)
+            _ok(f"{len(player_mapping)} joueur(s) mappé(s) ({Path(effective_mapping).name}).")
         except (FileNotFoundError, RuntimeError) as exc:
             logger.error("Erreur mapping : %s", exc)
             return 1
@@ -565,6 +711,8 @@ def main() -> None:
 
     if args.command == "build-context":
         exit_code = run_build_context(args)
+    elif args.command == "update-context":
+        exit_code = run_update_context(args)
     elif args.command == "transcribe":
         exit_code = run_transcribe(args)
     else:

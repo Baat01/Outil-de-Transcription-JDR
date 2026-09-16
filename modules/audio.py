@@ -467,6 +467,31 @@ def transcribe_audio(
     # ------------------------------------------------------------------
     # 2. Transcription initiale Whisper
     # ------------------------------------------------------------------
+    # Sécurité device / compute_type si CUDA n'est pas disponible
+    try:
+        import torch
+        has_cuda = torch.cuda.is_available()
+    except Exception:
+        has_cuda = False
+
+    if device == "cuda" and not has_cuda:
+        logger.warning(
+            "CUDA demandé mais aucun GPU NVIDIA compatible n'est disponible. "
+            "Bascule automatique sur CPU ('device=cpu', 'compute_type=int8')."
+        )
+        device = "cpu"
+        compute_type = "int8"
+
+    if device == "cpu" and compute_type == "float16":
+        logger.info(
+            "CTranslate2 ne supporte pas float16 sur CPU. Bascule automatique sur 'int8'."
+        )
+        compute_type = "int8"
+
+    asr_options: dict = {}
+    if initial_prompt:
+        asr_options["initial_prompt"] = initial_prompt
+
     logger.info(
         "Chargement du modèle Whisper '%s' (%s / %s)…",
         whisper_model, device, compute_type,
@@ -477,6 +502,7 @@ def transcribe_audio(
             device=device,
             compute_type=compute_type,
             language=language,
+            asr_options=asr_options if asr_options else None,
         )
     except Exception as exc:
         raise RuntimeError(
@@ -484,12 +510,8 @@ def transcribe_audio(
         ) from exc
 
     logger.info("Transcription en cours… (peut prendre plusieurs minutes)")
-    transcribe_kwargs: dict = {"batch_size": batch_size}
-    if initial_prompt:
-        transcribe_kwargs["initial_prompt"] = initial_prompt
-
     try:
-        result = model.transcribe(audio, **transcribe_kwargs)
+        result = model.transcribe(audio, batch_size=batch_size)
     except Exception as exc:
         raise RuntimeError(f"Erreur durant la transcription Whisper : {exc}") from exc
 

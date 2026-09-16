@@ -1,0 +1,4 @@
+# Ignore le contenu de ce dossier de transit, mais garde le dossier lui-même versionné.
+# Les fichiers traités sont automatiquement déplacés vers lore_inputs/ après update-context.
+*
+!.gitignore
