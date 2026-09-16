@@ -1,0 +1,78 @@
+# Environnements virtuels
+.venv/
+venv/
+env/
+ENV/
+
+# Cache et byte-code Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Fichiers audio, vidéo et sessions (médias lourds et privés)
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.ogg
+*.aac
+*.wma
+*.opus
+*.mp4
+*.mkv
+
+# Fichiers audio temporaires de fusion
+temp_merged_session.wav
+jdr_merged_session_*.wav
+
+# Dossier de lore personnel (PDFs de campagne)
+pdfs/
+pdfs_input/
+
+# Données personnelles des joueurs (garder players.example.json)
+players.json
+
+# Contextes lore générés (données de campagne privées)
+contexts/
+
+# Dossier de sortie des transcriptions et résumés
+output/
+
+# Variables d'environnement et secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Modèles locaux / Caches
+*.bin
+*.gguf
+.cache/
+
+# IDE et OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini

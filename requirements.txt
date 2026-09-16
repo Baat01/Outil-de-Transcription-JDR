@@ -1,0 +1,34 @@
+# ============================================================
+# Dépendances - Outil de Retranscription Vocale JDR
+# ============================================================
+# Installation recommandée (dans un environnement virtuel) :
+#   pip install -r requirements.txt
+#
+# Note : PyTorch doit être installé AVANT whisperx.
+# Pour GPU CUDA 11.8 :
+#   pip install torch==2.0.1 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
+# Pour CPU uniquement :
+#   pip install torch==2.0.1 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+# ============================================================
+
+# --- Transcription & Diarisation ---
+whisperx>=3.1.1
+pyannote.audio>=3.1.1
+
+# --- PDF ---
+pymupdf>=1.24.0
+
+# --- LLM Local ---
+ollama>=0.2.0
+
+# --- Audio multi-fichiers ---
+# ATTENTION : pydub nécessite que ffmpeg soit installé sur votre OS.
+# Windows : winget install ffmpeg  (ou téléchargement sur https://ffmpeg.org/download.html)
+# Linux   : sudo apt install ffmpeg
+# macOS   : brew install ffmpeg
+pydub>=0.25.1
+
+# --- Utilitaires ---
+tqdm>=4.66.0
+python-dotenv>=1.0.0
+
