@@ -50,10 +50,13 @@ pdfs_input/
 players.json
 
 # Contextes lore générés (données de campagne privées)
-contexts/
+# On ignore le contenu mais on versionne le dossier via son .gitignore interne
+contexts/*
+!contexts/.gitignore
 
 # Dossier de sortie des transcriptions et résumés
-output/
+output/*
+!output/.gitignore
 
 # Variables d'environnement et secrets
 .env
