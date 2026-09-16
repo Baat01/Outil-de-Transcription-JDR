@@ -1,14 +1,20 @@
 """
-main.py — v3 : Interface CLI avec sous-commandes (subcommands).
+main.py — v5 : Interface CLI avec sous-commandes (subcommands).
+
+Architecture des dossiers :
+  enregistrements/   Fichiers audio des sessions (entrée)
+  lore_inputs/       Fichiers PDF et Markdown de lore (entrée, récursif)
+  contexts/          Contextes lore thématiques JSON (sortie build-context)
+  output/            Transcriptions et résumés générés (sortie transcribe)
 
 Sous-commandes disponibles :
   build-context   Construit ou met à jour le contexte lore d'un thème
   transcribe      Lance le pipeline complet de retranscription
 
 Exemples :
-  python main.py build-context --theme "Naruto" --pdf-dir ./pdfs
-  python main.py transcribe --audio session.mp3 --context "Naruto"
-  python main.py transcribe --audio ./session_04/ --context "Naruto" --mapping players.json
+  python main.py build-context --theme "Naruto"
+  python main.py transcribe --context "Naruto"
+  python main.py transcribe --context "Naruto" --mapping players.json
 """
 
 import argparse
@@ -125,16 +131,19 @@ def build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     bc = subparsers.add_parser(
         "build-context",
-        help="Construit ou met à jour le contexte lore depuis un dossier de PDFs.",
+        help="Construit ou met à jour le contexte lore depuis un dossier de fichiers PDF ou Markdown.",
         description=(
-            "Lit tous les PDFs d'un dossier, extrait les entités de l'univers via LLM,\n"
-            "et sauvegarde (ou fusionne) un fichier JSON dans ./contexts/<theme>.json."
+            f"Explore récursivement le dossier '{config.LORE_INPUTS_DIR}/' (configurable),\n"
+            "extrait les entités de l'univers (personnages, lieux, factions...) via LLM,\n"
+            "et sauvegarde (ou fusionne) un fichier JSON dans le dossier de contextes."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Exemples :\n"
-            "  python main.py build-context --theme \"Naruto\" --pdf-dir ./pdfs\n"
-            "  python main.py build-context --theme \"Fantaisie\" --pdf-dir ./lore --model llama3.1:8b\n"
+            "  python main.py build-context --theme \"Naruto\"\n"
+            "  python main.py build-context --theme \"Fantaisie\" --model llama3.1:8b\n"
+            f"\nDossier source par défaut : ./{config.LORE_INPUTS_DIR}/\n"
+            "  (modifiable via la variable d'env JDR_LORE_INPUTS_DIR)\n"
         ),
     )
     bc.add_argument(
@@ -144,10 +153,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Nom de l'univers / thème (ex: \"Naruto\", \"Fantaisie\")",
     )
     bc.add_argument(
-        "--pdf-dir", "-p",
-        required=True,
+        "--input-dir", "-p",
+        default=config.LORE_INPUTS_DIR,
         metavar="DIR",
-        help="Dossier contenant les fichiers PDF de lore",
+        help=(
+            f"Dossier source de lore, exploré récursivement (défaut : {config.LORE_INPUTS_DIR}). "
+            "Supporte les fichiers .pdf et .md (exports Notion, wikis, etc.)."
+        ),
     )
     bc.add_argument(
         "--model", "-m",
@@ -169,33 +181,33 @@ def build_parser() -> argparse.ArgumentParser:
         "transcribe",
         help="Lance le pipeline complet de transcription + résumé.",
         description=(
-            "Transcrit un fichier audio, diarise les locuteurs, applique le contexte lore,\n"
-            "génère la fiche MJ et le résumé épique pour les joueurs."
+            f"Traite automatiquement les fichiers audio du dossier '{config.AUDIO_DIR}/',\n"
+            "transcrit avec WhisperX, diarise les locuteurs, applique le contexte lore,\n"
+            "et génère la fiche MJ et le résumé épique pour les joueurs."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Exemples :\n"
-            "  # Fichier unique\n"
-            "  python main.py transcribe --audio session.mp3 --context \"Naruto\"\n"
-            "  # Dossier de fichiers (multi-morceaux, tri naturel automatique)\n"
-            "  python main.py transcribe --audio ./session_04/ --context \"Naruto\"\n"
-            "  python main.py transcribe --audio ./session_04/ --context \"Fantaisie\" --mapping players.json\n"
-            "  python main.py transcribe --audio session.mp3 --context \"Naruto\" --no-diarization\n"
-            "\n"
-            "Note multi-fichiers :\n"
-            "  Si un dossier est fourni, tous les fichiers audio valides (.mp3, .wav, .m4a…)\n"
-            "  sont triés par ordre naturel (part_1, part_2, part_10…) et concaténés\n"
+            "  # Un ou plusieurs fichiers dans le dossier enregistrements/\n"
+            "  python main.py transcribe --context \"Naruto\"\n"
+            "  python main.py transcribe --context \"Fantaisie\" --mapping players.json\n"
+            "  python main.py transcribe --context \"Naruto\" --no-diarization\n"
+            f"\nDossier audio par défaut : ./{config.AUDIO_DIR}/\n"
+            "  (modifiable via la variable d'env JDR_AUDIO_DIR)\n"
+            "\nNote multi-fichiers :\n"
+            f"  Tous les fichiers audio valides de '{config.AUDIO_DIR}/' sont triés\n"
+            "  par ordre naturel (part_1, part_2, part_10…) et concaténés\n"
             "  automatiquement via pydub avant la transcription.\n"
             "  pydub nécessite ffmpeg : winget install ffmpeg  (Windows)\n"
         ),
     )
     tr.add_argument(
         "--audio", "-a",
-        required=True,
+        default=None,
         metavar="AUDIO_OR_DIR",
         help=(
-            "Fichier audio unique (mp3, wav, m4a, flac…) "
-            "ou dossier contenant plusieurs fichiers audio à concaténer."
+            f"Fichier audio ou dossier (défaut : dossier ./{config.AUDIO_DIR}/). "
+            "Si omis, traite tous les fichiers audio du dossier configuré."
         ),
     )
     tr.add_argument(
@@ -279,20 +291,20 @@ def run_build_context(args: argparse.Namespace) -> int:
     """
     start = time.time()
     theme = args.theme
-    pdf_dir = Path(args.pdf_dir).resolve()
+    input_dir = Path(args.input_dir).resolve()
     contexts_dir = Path(args.contexts_dir).resolve()
     model = args.model
 
     _banner(f"BUILD-CONTEXT : thème « {theme} »")
-    print(f"  Dossier PDFs  : {pdf_dir}")
-    print(f"  Contextes     : {contexts_dir}")
-    print(f"  Modèle LLM    : {model}")
-    print(f"{'═' * 65}")
+    print(f"  Dossier sources : {input_dir}")
+    print(f"  Contextes       : {contexts_dir}")
+    print(f"  Modèle LLM      : {model}")
+    print(f"{'=' * 65}")
 
     # Étape 1 — Vérifications
     _step(1, TOTAL_STEPS_BUILD, "Vérifications préalables")
-    if not pdf_dir.is_dir():
-        logger.error("Dossier PDF introuvable : %s", pdf_dir)
+    if not input_dir.is_dir():
+        logger.error("Dossier introuvable : %s", input_dir)
         return 1
     try:
         check_ollama_server()
@@ -307,7 +319,7 @@ def run_build_context(args: argparse.Namespace) -> int:
     try:
         context = build_context(
             theme=theme,
-            pdf_dir=pdf_dir,
+            input_dir=input_dir,
             contexts_dir=contexts_dir,
             model=model,
         )
@@ -354,7 +366,11 @@ def run_transcribe(args: argparse.Namespace) -> int:
         0 si succès, 1 si erreur critique.
     """
     start = time.time()
-    audio_input = Path(args.audio).resolve()
+    # Dossier audio : argument CLI prioritaire, sinon AUDIO_DIR par défaut
+    if args.audio is not None:
+        audio_input = Path(args.audio).resolve()
+    else:
+        audio_input = Path(config.AUDIO_DIR).resolve()
     output_dir = Path(args.output_dir).resolve()
     contexts_dir = Path(args.contexts_dir).resolve()
     theme = args.context

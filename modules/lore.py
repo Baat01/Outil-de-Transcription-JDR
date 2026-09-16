@@ -1,12 +1,13 @@
 """
-modules/lore.py — v2
-Gestion du contexte (Lore) multi-PDF et thématique.
+modules/lore.py — v3
+Gestion du contexte (Lore) multi-sources et thématique.
 
 Nouvelles fonctionnalités :
-  - Lecture de tous les PDF d'un dossier (--pdf-dir)
+  - Lecture récursive de tous les PDF et Markdown d'un dossier (--input-dir)
   - Sauvegarde du contexte dans ./contexts/<theme>.json
   - Merge intelligent avec le contexte existant via LLM
   - Construction du prompt initial WhisperX à partir du contexte JSON
+  - Robustesse : une erreur sur un fichier n'arrête pas le traitement global
 """
 
 import json
@@ -107,7 +108,7 @@ def _build_flat_keywords(context: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Extraction PDF
+# Extraction PDF et Markdown
 # ---------------------------------------------------------------------------
 
 def extract_text_from_pdf(pdf_path: str | Path) -> str:
@@ -136,37 +137,110 @@ def extract_text_from_pdf(pdf_path: str | Path) -> str:
         raise RuntimeError(f"Erreur lecture PDF : {exc}") from exc
 
 
-def extract_texts_from_pdf_dir(pdf_dir: str | Path) -> list[tuple[str, str]]:
+def extract_text_from_md(md_path: str | Path) -> str:
     """
-    Lit tous les PDF d'un dossier.
+    Lit le contenu brut d'un fichier Markdown en UTF-8.
+
+    Raises:
+        FileNotFoundError: Si le fichier n'existe pas.
+        RuntimeError:      En cas d'erreur de lecture ou d'encodage.
+    """
+    md_path = Path(md_path)
+    if not md_path.is_file():
+        raise FileNotFoundError(f"Fichier Markdown introuvable : {md_path}")
+
+    logger.info("Lecture du Markdown : %s", md_path.name)
+    try:
+        text = md_path.read_text(encoding="utf-8")
+        logger.info("Markdown lu : %d caractères.", len(text))
+        return text
+    except UnicodeDecodeError:
+        # Tentative de fallback en latin-1 pour les fichiers mal encodés
+        try:
+            text = md_path.read_text(encoding="latin-1")
+            logger.warning(
+                "Markdown '%s' lu avec l'encodage latin-1 (pas de l'UTF-8).",
+                md_path.name,
+            )
+            return text
+        except OSError as exc:
+            raise RuntimeError(
+                f"Impossible de lire le Markdown (encodage inconnu) : {md_path}\nDétail : {exc}"
+            ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"Erreur lecture Markdown : {md_path}\nDétail : {exc}") from exc
+
+
+def extract_texts_from_directory(input_dir: str | Path) -> list[tuple[str, str]]:
+    """
+    Explore récursivement un dossier et extrait le texte de tous les fichiers
+    PDF (.pdf) et Markdown (.md) trouvés dans l'arborescence.
+
+    Les fichiers sont triés par chemin relatif (ordre naturel du système de
+    fichiers) pour garantir la reproductibilité.
 
     Returns:
-        Liste de tuples (nom_du_fichier, texte_extrait).
+        Liste de tuples (chemin_relatif_str, texte_extrait).
 
     Raises:
         FileNotFoundError: Si le dossier n'existe pas.
-        RuntimeError:      Si aucun PDF n'est trouvé.
+        RuntimeError:      Si aucun fichier lisible n'est trouvé.
     """
-    pdf_dir = Path(pdf_dir)
-    if not pdf_dir.is_dir():
-        raise FileNotFoundError(f"Dossier PDF introuvable : {pdf_dir}")
+    input_dir = Path(input_dir)
+    if not input_dir.is_dir():
+        raise FileNotFoundError(f"Dossier introuvable : {input_dir}")
 
-    pdf_files = sorted(pdf_dir.glob("*.pdf"))
-    if not pdf_files:
-        raise RuntimeError(f"Aucun fichier PDF trouvé dans : {pdf_dir}")
+    # Recherche récursive, triée par chemin pour la reproductibilité
+    supported_files = sorted(
+        [
+            p for p in input_dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in (".pdf", ".md")
+        ]
+    )
 
-    logger.info("%d PDF trouvé(s) dans %s.", len(pdf_files), pdf_dir)
+    if not supported_files:
+        raise RuntimeError(
+            f"Aucun fichier PDF ou Markdown trouvé dans : {input_dir}\n"
+            "(recherche récursive dans tous les sous-dossiers)"
+        )
+
+    logger.info(
+        "%d fichier(s) trouvé(s) dans '%s' (récursif).",
+        len(supported_files),
+        input_dir,
+    )
+
     results: list[tuple[str, str]] = []
-    for pdf_path in pdf_files:
+    for file_path in supported_files:
+        # Nom relatif au dossier racine pour les messages de log
+        rel_name = str(file_path.relative_to(input_dir))
         try:
-            text = extract_text_from_pdf(pdf_path)
-            results.append((pdf_path.name, text))
-        except RuntimeError as exc:
-            logger.warning("PDF ignoré (%s) : %s", pdf_path.name, exc)
+            if file_path.suffix.lower() == ".pdf":
+                text = extract_text_from_pdf(file_path)
+            else:  # .md
+                text = extract_text_from_md(file_path)
+
+            if not text.strip():
+                logger.warning("Fichier vide ou sans texte exploitable, ignoré : %s", rel_name)
+                continue
+
+            results.append((rel_name, text))
+        except (FileNotFoundError, RuntimeError) as exc:
+            # L'erreur sur un fichier ne bloque PAS le traitement des autres
+            logger.warning("Fichier ignoré (%s) : %s", rel_name, exc)
 
     if not results:
-        raise RuntimeError("Aucun PDF lisible dans le dossier.")
+        raise RuntimeError(
+            "Aucun fichier PDF ou Markdown lisible trouvé dans le dossier.\n"
+            "Vérifiez les permissions et le format des fichiers."
+        )
+
+    logger.info("%d fichier(s) traité(s) avec succès.", len(results))
     return results
+
+
+# Alias de compatibilité ascendante (évite de casser d'éventuels appels externes)
+extract_texts_from_pdf_dir = extract_texts_from_directory
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +384,7 @@ def _merge_contexts_python(existing: dict, new_data: dict) -> dict:
 
 def build_context(
     theme: str,
-    pdf_dir: str | Path,
+    input_dir: str | Path,
     contexts_dir: str | Path = CONTEXTS_DIR,
     model: str = OLLAMA_MODEL,
 ) -> dict:
@@ -318,14 +392,15 @@ def build_context(
     Construit ou met à jour le contexte JSON pour un thème donné.
 
     1. Charge le contexte existant (s'il existe).
-    2. Lit tous les PDF du dossier.
-    3. Extrait les entités de chaque PDF via LLM.
+    2. Explore récursivement le dossier pour trouver les fichiers PDF et Markdown.
+    3. Extrait les entités de chaque fichier via LLM.
     4. Fusionne avec le contexte existant via LLM (merge intelligent).
     5. Sauvegarde le résultat dans ./contexts/<theme>.json.
 
     Args:
         theme:        Nom de l'univers / thème (ex: "Naruto", "Fantaisie").
-        pdf_dir:      Dossier contenant les PDFs à analyser.
+        input_dir:    Dossier (exploré récursivement) contenant les fichiers PDF
+                      et/ou Markdown (.md) à analyser.
         contexts_dir: Dossier de sauvegarde des contextes.
         model:        Modèle Ollama.
 
@@ -338,14 +413,18 @@ def build_context(
     existing_context = load_context(theme, contexts_dir)
     had_existing = bool(existing_context.get("keywords"))
 
-    # Lecture de tous les PDFs
-    pdf_texts = extract_texts_from_pdf_dir(pdf_dir)
-    logger.info("Traitement de %d PDF(s) pour le thème '%s'...", len(pdf_texts), theme)
+    # Exploration récursive du dossier (PDF + Markdown)
+    source_files = extract_texts_from_directory(input_dir)
+    logger.info(
+        "Traitement de %d fichier(s) (PDF/Markdown) pour le thème '%s'...",
+        len(source_files),
+        theme,
+    )
 
-    # Extraction structurée de chaque PDF
+    # Extraction structurée de chaque fichier
     aggregated: dict = {k: [] for k in CONTEXT_SCHEMA_KEYS}
-    for pdf_name, text in pdf_texts:
-        logger.info("  -> Extraction depuis : %s", pdf_name)
+    for file_name, text in source_files:
+        logger.info("  -> Extraction depuis : %s", file_name)
         extracted = _extract_structured_from_text(text, theme=theme, model=model)
         # Agrégation locale (simple merge Python)
         for key in CONTEXT_SCHEMA_KEYS:
@@ -395,7 +474,7 @@ def load_context_for_transcription(
         raise FileNotFoundError(
             f"Aucun contexte trouvé pour le thème '{theme}'.\n"
             f"Fichier attendu : {path}\n"
-            f"Créez-le d'abord avec : python main.py build-context --theme \"{theme}\" --pdf-dir ./pdfs"
+            f"Créez-le d'abord avec : python main.py build-context --theme \"{theme}\" --input-dir ./pdfs"
         )
 
     context = load_context(theme, contexts_dir)

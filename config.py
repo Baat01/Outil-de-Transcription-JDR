@@ -4,6 +4,7 @@ Toutes les constantes ajustables sont centralisées ici.
 """
 
 import os
+from pathlib import Path
 
 try:
     from dotenv import load_dotenv
@@ -57,16 +58,36 @@ CHUNK_MAX_WORDS: int = 2000
 CHUNK_OVERLAP_WORDS: int = 100
 
 # ---------------------------------------------------------------------------
-# Sortie
+# Dossiers de travail standardisés
 # ---------------------------------------------------------------------------
 
-# Dossier de sortie par défaut (sera créé si absent)
-OUTPUT_DIR: str = os.getenv("JDR_OUTPUT_DIR", "output")
+# Dossier contenant les fichiers audio des sessions (entrée)
+AUDIO_DIR: str = os.getenv("JDR_AUDIO_DIR", "enregistrements")
 
-# Dossier des contextes lore thématiques (JSON éditables)
+# Dossier contenant les sources de lore (.pdf et .md) pour build-context (entrée)
+LORE_INPUTS_DIR: str = os.getenv("JDR_LORE_INPUTS_DIR", "lore_inputs")
+
+# Dossier de sauvegarde des contextes lore thématiques (JSON éditables, sortie)
 CONTEXTS_DIR: str = os.getenv("JDR_CONTEXTS_DIR", "contexts")
 
+# Dossier de sortie des transcriptions et résumés générés
+OUTPUT_DIR: str = os.getenv("JDR_OUTPUT_DIR", "output")
+
+# ---------------------------------------------------------------------------
+# Initialisation automatique des dossiers au démarrage
+# ---------------------------------------------------------------------------
+
+def _ensure_dirs() -> None:
+    """Crée les dossiers de travail s'ils n'existent pas encore."""
+    for _dir in (AUDIO_DIR, LORE_INPUTS_DIR, CONTEXTS_DIR, OUTPUT_DIR):
+        Path(_dir).mkdir(parents=True, exist_ok=True)
+
+_ensure_dirs()
+
+# ---------------------------------------------------------------------------
 # Noms des fichiers de sortie
+# ---------------------------------------------------------------------------
+
 # Retranscription diarisée lisible : [HH:MM:SS] Nom : "texte"
 OUTPUT_TRANSCRIPT_DIARIZED: str = "transcript_session.txt"
 # Transcription brute (format interne pour chunking)
